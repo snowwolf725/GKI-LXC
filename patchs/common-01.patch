@@ -1,0 +1,58 @@
+diff --git a/fs/overlayfs/util.c b/fs/overlayfs/util.c
+index 63e0bdbd2..805523483 100644
+--- a/fs/overlayfs/util.c
++++ b/fs/overlayfs/util.c
+@@ -145,9 +145,7 @@ void ovl_dentry_init_flags(struct dentry *dentry, struct dentry *upperdentry,
+ bool ovl_dentry_weird(struct dentry *dentry)
+ {
+ 	return dentry->d_flags & (DCACHE_NEED_AUTOMOUNT |
+-				  DCACHE_MANAGE_TRANSIT |
+-				  DCACHE_OP_HASH |
+-				  DCACHE_OP_COMPARE);
++				  DCACHE_MANAGE_TRANSIT);
+ }
+ 
+ enum ovl_path_type ovl_path_type(struct dentry *dentry)
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index 9bf089ccd..4cfeba5a2 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -4235,6 +4235,11 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
+ 		spin_unlock_irq(&cgroup_file_kn_lock);
+ 	}
+ 
++	if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {
++		snprintf(name, CGROUP_FILE_NAME_MAX, "%s.%s", cft->ss->name, cft->name);
++		kernfs_create_link(cgrp->kn, name, kn);
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+index 4460dcce9..424bc79d9 100644
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -2740,6 +2740,9 @@ static int load_module(struct load_info *info, const char __user *uargs,
+ 	long err = 0;
+ 	char *after_dashes;
+ 
++	flags |= MODULE_INIT_IGNORE_MODVERSIONS;
++ 	flags |= MODULE_INIT_IGNORE_VERMAGIC;
++
+ 	/*
+ 	 * Do the signature check (if any) first. All that
+ 	 * the signature check needs is info->len, it does
+diff --git a/kernel/module/version.c b/kernel/module/version.c
+index 53f43ac5a..56a6c6bf1 100644
+--- a/kernel/module/version.c
++++ b/kernel/module/version.c
+@@ -52,7 +52,7 @@ int check_version(const struct load_info *info,
+ 
+ bad_version:
+ 	pr_warn("%s: disagrees about version of symbol %s\n", info->name, symname);
+-	return 0;
++	return 1;
+ }
+ 
+ int check_modstruct_version(const struct load_info *info,
