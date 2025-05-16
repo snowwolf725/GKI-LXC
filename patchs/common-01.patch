@@ -39,7 +39,7 @@ index 4460dcce9..424bc79d9 100644
  
 +	flags |= MODULE_INIT_IGNORE_MODVERSIONS;
 +	flags |= MODULE_INIT_IGNORE_VERMAGIC;
-+ ;
++ 
  	/*
  	 * Do the signature check (if any) first. All that
  	 * the signature check needs is info->len, it does
