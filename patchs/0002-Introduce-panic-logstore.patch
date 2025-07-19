@@ -1,0 +1,195 @@
+From 2ec032676f399a65d7de721168b03b9a12c29bdc Mon Sep 17 00:00:00 2001
+From: SnowWolf725 <snowwolf725@gmail.com>
+Date: Fri, 18 Jul 2025 22:10:42 +0800
+Subject: [PATCH] Introduce panic logstore
+
+---
+ include/linux/panic_logstore.h | 10 +++++
+ kernel/Makefile                |  2 +
+ kernel/panic.c                 | 13 ++++++
+ kernel/panic_logstore.c        | 80 ++++++++++++++++++++++++++++++++++
+ security/selinux/selinuxfs.c   | 19 ++++++++
+ 5 files changed, 124 insertions(+)
+ create mode 100644 include/linux/panic_logstore.h
+ create mode 100644 kernel/panic_logstore.c
+
+diff --git a/include/linux/panic_logstore.h b/include/linux/panic_logstore.h
+new file mode 100644
+index 000000000000..5e534c1bb711
+--- /dev/null
++++ b/include/linux/panic_logstore.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2023 LibXZR <i@xzr.moe>.
++ */
++#ifndef _PANIC_LOGSTORE_H_
++#define _PANIC_LOGSTORE_H_
++
++void do_logstore(void);
++
++#endif /* _PANIC_LOGSTORE_H_ */
+\ No newline at end of file
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 3d6314879bbc..53fddaba4283 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -11,6 +11,8 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+ 	    async.o range.o smpboot.o ucount.o regset.o delayacct.o
++	    
++obj-y += panic_logstore.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MODULES) += kmod.o
+diff --git a/kernel/panic.c b/kernel/panic.c
+index e6c2bf04a32c..2c857c3fbd3b 100644
+--- a/kernel/panic.c
++++ b/kernel/panic.c
+@@ -32,6 +32,7 @@
+ #include <linux/bug.h>
+ #include <linux/ratelimit.h>
+ #include <linux/debugfs.h>
++#include <linux/panic_logstore.h>
+ #include <linux/sysfs.h>
+ #include <linux/context_tracking.h>
+ #include <trace/events/error_report.h>
+@@ -339,6 +340,18 @@ void panic(const char *fmt, ...)
+ 		dump_stack();
+ #endif
+ 
++	/**
++	 * Dump the log before forcibly shutting down other CPUs because the
++	 * related interrupts (e.g. UFS controller) could be running on them.
++	 * We have no chance to migrate them in this critical context. Simply
++	 * dump the log here although it doesn't give full information, but
++	 * it's useful enough.
++	 */
++	local_irq_enable();
++	do_logstore();
++	mdelay(1000);
++	local_irq_disable();
++
+ 	/*
+ 	 * If kgdb is enabled, give it a chance to run before we stop all
+ 	 * the other CPUs or else we won't be able to debug processes left
+diff --git a/kernel/panic_logstore.c b/kernel/panic_logstore.c
+new file mode 100644
+index 000000000000..2b2af96c0e00
+--- /dev/null
++++ b/kernel/panic_logstore.c
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) 2023 LibXZR <i@xzr.moe>.
++ */
++
++#define pr_fmt(fmt) "panic_logstore: " fmt
++
++#include <linux/cred.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/kernel.h>
++#include <linux/kmsg_dump.h>
++#include <linux/module.h>
++
++#define LOG_FILE_PATH "/mnt/oplus/op2/last_panic.txt"
++
++#if IS_ENABLED(CONFIG_SECURITY_SELINUX_DEVELOP)
++void sel_set_enforce(int);
++#else
++#error CONFIG_SECURITY_SELINUX_DEVELOP is not enabled.
++#endif
++
++void do_logstore(void)
++{
++	const struct cred *saved_cred, *root_cred;
++	struct kmsg_dump_iter iter;
++	char buf[1024] = {0};
++	struct file *f;
++	size_t len;
++	int ret;
++
++	// Well, it's always not a good idea to permissive selinux.
++	// But we are already in panic, so what?
++	sel_set_enforce(0);
++	root_cred = prepare_kernel_cred(NULL);
++	saved_cred = override_creds(root_cred);
++
++	f = filp_open(LOG_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (IS_ERR(f)) {
++		ret = PTR_ERR(f);
++		pr_err("Unable to open log file, ret = %d", ret);
++		goto exit;
++	}
++
++	kmsg_dump_rewind(&iter);
++	while (kmsg_dump_get_line(&iter, false, buf, sizeof(buf), &len)) {
++		ret = kernel_write(f, buf, len, &f->f_pos);
++		if (ret != len) {
++			pr_err("Unable to write log file, ret = %d", ret);
++			goto clean;
++		}
++	}
++
++	ret = vfs_fsync(f, 0);
++	if (ret) {
++		pr_err("Unable to sync log file, ret = %d", ret);
++		goto clean;
++	}
++
++	pr_info("Panic logstore is done.");
++
++clean:
++	filp_close(f, NULL);
++exit:
++	revert_creds(saved_cred);
++	sel_set_enforce(1);
++}
++
++static int logstore_trigger_store(
++        const char *buf, const struct kernel_param *kp)
++{
++	do_logstore();
++	return 0;
++}
++
++static struct kernel_param_ops logstore_trigger_ops = {
++	.set = &logstore_trigger_store,
++};
++
++module_param_cb(trigger, &logstore_trigger_ops, NULL, 0644);
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index 755325a94a86..75f5db35ad90 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -135,6 +135,25 @@ static ssize_t sel_read_enforce(struct file *filp, char __user *buf,
+ }
+ 
+ #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
++void sel_set_enforce(int new_value)
++{
++	struct selinux_state *state = &selinux_state;
++	int old_value;
++
++	new_value = !!new_value;
++
++	old_value = enforcing_enabled(state);
++	if (new_value != old_value) {
++		enforcing_set(state, new_value);
++		if (new_value)
++			avc_ss_reset(state->avc, 0);
++		selnl_notify_setenforce(new_value);
++		selinux_status_update_setenforce(state, new_value);
++		if (!new_value)
++			call_blocking_lsm_notifier(LSM_POLICY_CHANGE, NULL);
++	}
++}
++
+ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
+ 				 size_t count, loff_t *ppos)
+ 
+-- 
+2.50.1
+
